@@ -1,14 +1,14 @@
+use base64::Engine;
+use chrono::{DateTime, Duration, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    convert::TryFrom,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
     },
 };
-use time::OffsetDateTime as DateTime;
 
 /// # The main session type.
 ///
@@ -57,7 +57,7 @@ use time::OffsetDateTime as DateTime;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     id: String,
-    expiry: Option<DateTime>,
+    expiry: Option<DateTime<Utc>>,
     data: Arc<RwLock<HashMap<String, String>>>,
 
     #[serde(skip)]
@@ -91,7 +91,7 @@ impl Default for Session {
 fn generate_cookie(len: usize) -> String {
     let mut key = vec![0u8; len];
     rand::thread_rng().fill_bytes(&mut key);
-    base64::encode(key)
+    base64::prelude::BASE64_STANDARD.encode(key)
 }
 
 impl Session {
@@ -138,9 +138,9 @@ impl Session {
     /// # Ok(()) }) }
     /// ```
     pub fn id_from_cookie_value(string: &str) -> Result<String, base64::DecodeError> {
-        let decoded = base64::decode(string)?;
+        let decoded = base64::prelude::BASE64_STANDARD.decode(string)?;
         let hash = blake3::hash(&decoded);
-        Ok(base64::encode(hash.as_bytes()))
+        Ok(base64::prelude::BASE64_STANDARD.encode(&hash.as_bytes()))
     }
 
     /// mark this session for destruction. the actual session record
@@ -157,7 +157,7 @@ impl Session {
     /// assert!(session.is_destroyed());
     /// # Ok(()) }) }
     pub fn destroy(&mut self) {
-        self.destroy.store(true, Ordering::SeqCst);
+        self.destroy.store(true, Ordering::Relaxed);
     }
 
     /// returns true if this session is marked for destruction
@@ -174,7 +174,7 @@ impl Session {
     /// # Ok(()) }) }
 
     pub fn is_destroyed(&self) -> bool {
-        self.destroy.load(Ordering::SeqCst)
+        self.destroy.load(Ordering::Relaxed)
     }
 
     /// Gets the session id
@@ -230,7 +230,7 @@ impl Session {
         let mut data = self.data.write().unwrap();
         if data.get(key) != Some(&value) {
             data.insert(key.to_string(), value);
-            self.data_changed.store(true, Ordering::Release);
+            self.data_changed.store(true, Ordering::Relaxed);
         }
     }
 
@@ -281,7 +281,7 @@ impl Session {
     pub fn remove(&mut self, key: &str) {
         let mut data = self.data.write().unwrap();
         if data.remove(key).is_some() {
-            self.data_changed.store(true, Ordering::Release);
+            self.data_changed.store(true, Ordering::Relaxed);
         }
     }
 
@@ -297,21 +297,8 @@ impl Session {
     /// assert_eq!(session.len(), 1);
     /// ```
     pub fn len(&self) -> usize {
-        self.data.read().unwrap().len()
-    }
-
-    /// returns a boolean indicating whether there are zero elements in the session hashmap
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// # use async_session::Session;
-    /// let mut session = Session::new();
-    /// assert!(session.is_empty());
-    /// session.insert("key", 0);
-    /// assert!(!session.is_empty());
-    pub fn is_empty(&self) -> bool {
-        return self.data.read().unwrap().is_empty();
+        let data = self.data.read().unwrap();
+        data.len()
     }
 
     /// Generates a new id and cookie for this session
@@ -356,6 +343,10 @@ impl Session {
         self.cookie_value = Some(cookie_value)
     }
 
+    /// set_id
+    pub fn set_id(&mut self, id:String) {
+        self.id = id;
+    }
     /// returns the expiry timestamp of this session, if there is one
     ///
     /// # Example
@@ -369,7 +360,7 @@ impl Session {
     /// assert!(session.expiry().is_some());
     /// # Ok(()) }) }
     /// ```
-    pub fn expiry(&self) -> Option<&DateTime> {
+    pub fn expiry(&self) -> Option<&DateTime<Utc>> {
         self.expiry.as_ref()
     }
 
@@ -382,12 +373,17 @@ impl Session {
     /// # fn main() -> async_session::Result { async_std::task::block_on(async {
     /// let mut session = Session::new();
     /// assert_eq!(None, session.expiry());
-    /// session.set_expiry(time::OffsetDateTime::now_utc());
+    /// session.set_expiry(chrono::Utc::now());
     /// assert!(session.expiry().is_some());
     /// # Ok(()) }) }
     /// ```
-    pub fn set_expiry(&mut self, expiry: DateTime) {
+    pub fn set_expiry(&mut self, expiry: DateTime<Utc>) {
         self.expiry = Some(expiry);
+    }
+
+    /// clear_expiry
+    pub fn clear_expiry(&mut self) {
+        self.expiry = None;
     }
 
     /// assigns the expiry timestamp to a duration from the current time.
@@ -404,7 +400,7 @@ impl Session {
     /// # Ok(()) }) }
     /// ```
     pub fn expire_in(&mut self, ttl: std::time::Duration) {
-        self.expiry = Some(DateTime::now_utc() + ttl);
+        self.expiry = Some(Utc::now() + Duration::from_std(ttl).unwrap());
     }
 
     /// predicate function to determine if this session is
@@ -429,7 +425,7 @@ impl Session {
     /// ```
     pub fn is_expired(&self) -> bool {
         match self.expiry {
-            Some(expiry) => expiry < DateTime::now_utc(),
+            Some(expiry) => expiry < Utc::now(),
             None => false,
         }
     }
@@ -479,7 +475,7 @@ impl Session {
     /// # Ok(()) }) }
     /// ```
     pub fn data_changed(&self) -> bool {
-        self.data_changed.load(Ordering::Acquire)
+        self.data_changed.load(Ordering::Relaxed)
     }
 
     /// Resets `data_changed` dirty tracking. This is unnecessary for
@@ -503,7 +499,7 @@ impl Session {
     /// # Ok(()) }) }
     /// ```
     pub fn reset_data_changed(&self) {
-        self.data_changed.store(false, Ordering::SeqCst);
+        self.data_changed.store(false, Ordering::Relaxed);
     }
 
     /// Ensures that this session is not expired. Returns None if it is expired
@@ -523,12 +519,7 @@ impl Session {
     /// ```
     /// Duration from now to the expiry time of this session
     pub fn expires_in(&self) -> Option<std::time::Duration> {
-        let dur = self.expiry? - DateTime::now_utc();
-        if dur.is_negative() {
-            None
-        } else {
-            std::time::Duration::try_from(dur).ok()
-        }
+        self.expiry?.signed_duration_since(Utc::now()).to_std().ok()
     }
 
     /// takes the cookie value and consume this session.
